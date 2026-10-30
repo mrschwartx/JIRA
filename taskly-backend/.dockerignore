@@ -1,0 +1,12 @@
+node_modules
+logs
+coverage
+.git
+*.md
+.env*
+!.env.example
+test
+eslint.config.js
+.prettierrc.json
+.prettierignore
+public/images/users/avatar-*

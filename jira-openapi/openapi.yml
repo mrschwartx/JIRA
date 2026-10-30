@@ -1,0 +1,951 @@
+openapi: 3.1.0
+info:
+  title: Jira Clone API
+  description: |
+    REST API for the simplified Jira clone (Express + TypeORM + PostgreSQL).
+
+    **Auth.** No login: `POST /authentication/guest` creates a guest account and returns a JWT (180 days).
+    Send it as `Authorization: Bearer <token>`. Each user belongs to one project, and `/project` and
+    `GET /issues` are scoped to it.
+
+    **Conventions.** All successes return `200` with JSON (deleted entities have no `id`). All errors
+    return `{ "error": { message, code, status, data } }`. Timestamps are ISO 8601.
+
+    **Known limitations.** No ownership checks on issues or comments; `userId` and `projectId` are
+    trusted from the body; `PUT` assigns any field sent; issue `description` is unsanitized HTML; the
+    guest endpoint is not rate limited.
+  contact:
+    name: Ivor Reic
+    url: https://github.com/oldboyxx/jira_clone
+  license:
+    name: MIT License
+    url: https://opensource.org/licenses/MIT
+  version: 1.0.0
+tags:
+- name: Authentication
+- name: Current User
+- name: Project
+- name: Issues
+- name: Comments
+- name: Test
+  description: Only mounted when `NODE_ENV=test`.
+servers:
+- url: http://localhost:3000
+  description: Local development
+security:
+- BearerAuth: []
+paths:
+  /authentication/guest:
+    post:
+      tags:
+      - Authentication
+      summary: Create a guest account
+      description: Seeds a project with 3 users, 8 issues and 8 comments.
+      operationId: createGuestAccount
+      security: []
+      responses:
+        '200':
+          $ref: '#/components/responses/AuthTokenResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /currentUser:
+    get:
+      tags:
+      - Current User
+      summary: Get the authenticated user
+      operationId: getCurrentUser
+      responses:
+        '200':
+          description: The authenticated user
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - currentUser
+                properties:
+                  currentUser:
+                    $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/InvalidToken'
+  /project:
+    get:
+      tags:
+      - Project
+      summary: Get the current user's project
+      operationId: getProject
+      responses:
+        '200':
+          description: Project with users and issues
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - project
+                properties:
+                  project:
+                    $ref: '#/components/schemas/ProjectWithUsersAndIssues'
+        '401':
+          $ref: '#/components/responses/InvalidToken'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags:
+      - Project
+      summary: Update the current user's project
+      operationId: updateProject
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectUpdate'
+      responses:
+        '200':
+          description: The updated project
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - project
+                properties:
+                  project:
+                    $ref: '#/components/schemas/Project'
+        '400':
+          $ref: '#/components/responses/BadUserInput'
+        '401':
+          $ref: '#/components/responses/InvalidToken'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /issues:
+    get:
+      tags:
+      - Issues
+      summary: List or search the project's issues
+      description: Case-insensitive `ILIKE` on title and description text. `%` and `_` are not escaped
+        and act as wildcards.
+      operationId: getIssues
+      parameters:
+      - name: searchTerm
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Matching issues
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - issues
+                properties:
+                  issues:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Issue'
+        '401':
+          $ref: '#/components/responses/InvalidToken'
+    post:
+      tags:
+      - Issues
+      summary: Create an issue
+      description: Any `listPosition` sent is ignored; the issue is placed at the top of its column.
+      operationId: createIssue
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IssueCreate'
+            example:
+              title: Fix login redirect
+              type: bug
+              status: backlog
+              priority: '4'
+              description: <p>Users land on a blank page.</p>
+              reporterId: 3
+              projectId: 1
+              users:
+              - id: 2
+      responses:
+        '200':
+          description: The created issue
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - issue
+                properties:
+                  issue:
+                    $ref: '#/components/schemas/Issue'
+        '400':
+          $ref: '#/components/responses/BadUserInput'
+        '401':
+          $ref: '#/components/responses/InvalidToken'
+  /issues/{issueId}:
+    parameters:
+    - $ref: '#/components/parameters/issueId'
+    get:
+      tags:
+      - Issues
+      summary: Get an issue with its assignees and comments
+      operationId: getIssue
+      responses:
+        '200':
+          description: The issue with `users` and `comments` (each with its `user`)
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - issue
+                properties:
+                  issue:
+                    $ref: '#/components/schemas/IssueWithUsersAndComments'
+        '401':
+          $ref: '#/components/responses/InvalidToken'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags:
+      - Issues
+      summary: Update an issue
+      description: Partial update. Sending `users` replaces the assignees.
+      operationId: updateIssue
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IssueUpdate'
+            examples:
+              dragAndDrop:
+                summary: Move an issue to another column
+                value:
+                  status: inprogress
+                  listPosition: 2.5
+              assignees:
+                summary: Replace assignees
+                value:
+                  users:
+                  - id: 1
+                  - id: 3
+      responses:
+        '200':
+          description: The updated issue
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - issue
+                properties:
+                  issue:
+                    $ref: '#/components/schemas/Issue'
+        '400':
+          $ref: '#/components/responses/BadUserInput'
+        '401':
+          $ref: '#/components/responses/InvalidToken'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags:
+      - Issues
+      summary: Delete an issue
+      description: Its comments are deleted by cascade.
+      operationId: deleteIssue
+      responses:
+        '200':
+          description: The deleted issue (without `id`)
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - issue
+                properties:
+                  issue:
+                    $ref: '#/components/schemas/DeletedIssue'
+        '401':
+          $ref: '#/components/responses/InvalidToken'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /comments:
+    post:
+      tags:
+      - Comments
+      summary: Create a comment
+      operationId: createComment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommentCreate'
+      responses:
+        '200':
+          description: The created comment
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - comment
+                properties:
+                  comment:
+                    $ref: '#/components/schemas/Comment'
+        '400':
+          $ref: '#/components/responses/BadUserInput'
+        '401':
+          $ref: '#/components/responses/InvalidToken'
+  /comments/{commentId}:
+    parameters:
+    - $ref: '#/components/parameters/commentId'
+    put:
+      tags:
+      - Comments
+      summary: Update a comment
+      operationId: updateComment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommentUpdate'
+      responses:
+        '200':
+          description: The updated comment
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - comment
+                properties:
+                  comment:
+                    $ref: '#/components/schemas/Comment'
+        '400':
+          $ref: '#/components/responses/BadUserInput'
+        '401':
+          $ref: '#/components/responses/InvalidToken'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags:
+      - Comments
+      summary: Delete a comment
+      operationId: deleteComment
+      responses:
+        '200':
+          description: The deleted comment (without `id`)
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - comment
+                properties:
+                  comment:
+                    $ref: '#/components/schemas/DeletedComment'
+        '401':
+          $ref: '#/components/responses/InvalidToken'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /test/reset-database:
+    delete:
+      tags:
+      - Test
+      summary: Drop and recreate the database schema
+      description: Test mode only. Destroys all data.
+      operationId: resetDatabase
+      security: []
+      responses:
+        '200':
+          description: Database was reset
+          content:
+            application/json:
+              schema:
+                type: boolean
+                const: true
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /test/create-account:
+    post:
+      tags:
+      - Test
+      summary: Create a deterministic test account
+      description: Test mode only. Seeds 2 users, 1 project, 3 issues and 1 comment.
+      operationId: createTestAccount
+      security: []
+      responses:
+        '200':
+          $ref: '#/components/responses/AuthTokenResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+components:
+  schemas:
+    IssueType:
+      type: string
+      enum:
+      - task
+      - bug
+      - story
+    IssueStatus:
+      type: string
+      enum:
+      - backlog
+      - selected
+      - inprogress
+      - done
+    IssuePriority:
+      type: string
+      description: 5 = highest, 1 = lowest.
+      enum:
+      - '5'
+      - '4'
+      - '3'
+      - '2'
+      - '1'
+    ProjectCategory:
+      type: string
+      enum:
+      - software
+      - marketing
+      - business
+    User:
+      type: object
+      required:
+      - id
+      - name
+      - email
+      - avatarUrl
+      - createdAt
+      - updatedAt
+      - projectId
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+          maxLength: 100
+        email:
+          type: string
+          maxLength: 200
+        avatarUrl:
+          type: string
+          maxLength: 2000
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        projectId:
+          type: integer
+    Project:
+      type: object
+      required:
+      - id
+      - name
+      - url
+      - description
+      - category
+      - createdAt
+      - updatedAt
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+          maxLength: 100
+        url:
+          type:
+          - string
+          - 'null'
+        description:
+          type:
+          - string
+          - 'null'
+          description: HTML produced by the rich-text editor.
+        category:
+          $ref: '#/components/schemas/ProjectCategory'
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    ProjectWithUsersAndIssues:
+      allOf:
+      - $ref: '#/components/schemas/Project'
+      - type: object
+        required:
+        - users
+        - issues
+        properties:
+          users:
+            type: array
+            items:
+              $ref: '#/components/schemas/User'
+          issues:
+            type: array
+            items:
+              $ref: '#/components/schemas/IssuePartial'
+    ProjectUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        url:
+          type:
+          - string
+          - 'null'
+          description: Must match the server's URL pattern (scheme optional) when present.
+        description:
+          type:
+          - string
+          - 'null'
+        category:
+          $ref: '#/components/schemas/ProjectCategory'
+    IssuePartial:
+      type: object
+      required:
+      - id
+      - title
+      - type
+      - status
+      - priority
+      - listPosition
+      - createdAt
+      - updatedAt
+      - userIds
+      properties:
+        id:
+          type: integer
+        title:
+          type: string
+        type:
+          $ref: '#/components/schemas/IssueType'
+        status:
+          $ref: '#/components/schemas/IssueStatus'
+        priority:
+          $ref: '#/components/schemas/IssuePriority'
+        listPosition:
+          type: number
+          format: double
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        userIds:
+          type: array
+          description: IDs of the assignees.
+          items:
+            type: integer
+    IssueFields:
+      type: object
+      properties:
+        id:
+          type: integer
+        title:
+          type: string
+          maxLength: 200
+        type:
+          $ref: '#/components/schemas/IssueType'
+        status:
+          $ref: '#/components/schemas/IssueStatus'
+        priority:
+          $ref: '#/components/schemas/IssuePriority'
+        listPosition:
+          type: number
+          format: double
+          description: Ascending sort key within a status column.
+        description:
+          type:
+          - string
+          - 'null'
+          description: Unsanitized HTML from the rich-text editor.
+        descriptionText:
+          type:
+          - string
+          - 'null'
+          description: Tag-stripped `description` used by search.
+        estimate:
+          type:
+          - integer
+          - 'null'
+          description: Original estimate in hours.
+        timeSpent:
+          type:
+          - integer
+          - 'null'
+          description: Logged time in hours.
+        timeRemaining:
+          type:
+          - integer
+          - 'null'
+          description: Remaining time in hours.
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        reporterId:
+          type: integer
+        projectId:
+          type: integer
+        userIds:
+          type: array
+          description: Assignee IDs (may be absent on some list responses).
+          items:
+            type: integer
+    Issue:
+      allOf:
+      - $ref: '#/components/schemas/IssueFields'
+      - type: object
+        required:
+        - id
+        - title
+        - type
+        - status
+        - priority
+        - listPosition
+        - description
+        - descriptionText
+        - estimate
+        - timeSpent
+        - timeRemaining
+        - createdAt
+        - updatedAt
+        - reporterId
+        - projectId
+    DeletedIssue:
+      description: The deleted issue. `id` is omitted.
+      allOf:
+      - $ref: '#/components/schemas/IssueFields'
+      - type: object
+        required:
+        - title
+        - type
+        - status
+        - priority
+        - listPosition
+        - description
+        - descriptionText
+        - estimate
+        - timeSpent
+        - timeRemaining
+        - createdAt
+        - updatedAt
+        - reporterId
+        - projectId
+    IssueWithUsersAndComments:
+      allOf:
+      - $ref: '#/components/schemas/Issue'
+      - type: object
+        required:
+        - users
+        - comments
+        properties:
+          users:
+            type: array
+            items:
+              $ref: '#/components/schemas/User'
+          comments:
+            type: array
+            items:
+              $ref: '#/components/schemas/CommentWithUser'
+    IssueCreate:
+      type: object
+      required:
+      - title
+      - type
+      - status
+      - priority
+      - reporterId
+      - projectId
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        type:
+          $ref: '#/components/schemas/IssueType'
+        status:
+          $ref: '#/components/schemas/IssueStatus'
+        priority:
+          $ref: '#/components/schemas/IssuePriority'
+        description:
+          type:
+          - string
+          - 'null'
+        estimate:
+          type:
+          - integer
+          - 'null'
+        timeSpent:
+          type:
+          - integer
+          - 'null'
+        timeRemaining:
+          type:
+          - integer
+          - 'null'
+        reporterId:
+          type: integer
+        projectId:
+          type: integer
+          description: Taken from the body as-is (not derived from the caller).
+        users:
+          type: array
+          description: Assignees as objects with only `id`.
+          items:
+            type: object
+            required:
+            - id
+            properties:
+              id:
+                type: integer
+    IssueUpdate:
+      type: object
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        type:
+          $ref: '#/components/schemas/IssueType'
+        status:
+          $ref: '#/components/schemas/IssueStatus'
+        priority:
+          $ref: '#/components/schemas/IssuePriority'
+        listPosition:
+          type: number
+          format: double
+        description:
+          type:
+          - string
+          - 'null'
+        estimate:
+          type:
+          - integer
+          - 'null'
+        timeSpent:
+          type:
+          - integer
+          - 'null'
+        timeRemaining:
+          type:
+          - integer
+          - 'null'
+        reporterId:
+          type: integer
+        users:
+          type: array
+          items:
+            type: object
+            required:
+            - id
+            properties:
+              id:
+                type: integer
+    CommentFields:
+      type: object
+      properties:
+        id:
+          type: integer
+        body:
+          type: string
+          description: Plain text.
+          maxLength: 50000
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        userId:
+          type: integer
+        issueId:
+          type: integer
+    Comment:
+      allOf:
+      - $ref: '#/components/schemas/CommentFields'
+      - type: object
+        required:
+        - id
+        - body
+        - createdAt
+        - updatedAt
+        - userId
+        - issueId
+    DeletedComment:
+      description: The deleted comment. `id` is omitted.
+      allOf:
+      - $ref: '#/components/schemas/CommentFields'
+      - type: object
+        required:
+        - body
+        - createdAt
+        - updatedAt
+        - userId
+        - issueId
+    CommentWithUser:
+      allOf:
+      - $ref: '#/components/schemas/Comment'
+      - type: object
+        required:
+        - user
+        properties:
+          user:
+            $ref: '#/components/schemas/User'
+    CommentCreate:
+      type: object
+      required:
+      - body
+      - issueId
+      - userId
+      properties:
+        body:
+          type: string
+          minLength: 1
+          maxLength: 50000
+        issueId:
+          type: integer
+        userId:
+          type: integer
+          description: Taken from the body as-is (not derived from the caller).
+    CommentUpdate:
+      type: object
+      required:
+      - body
+      properties:
+        body:
+          type: string
+          minLength: 1
+          maxLength: 50000
+    ErrorCode:
+      type: string
+      enum:
+      - INVALID_TOKEN
+      - BAD_USER_INPUT
+      - ENTITY_NOT_FOUND
+      - ROUTE_NOT_FOUND
+      - INTERNAL_ERROR
+    ErrorResponse:
+      type: object
+      required:
+      - error
+      properties:
+        error:
+          type: object
+          required:
+          - message
+          - code
+          - status
+          - data
+          properties:
+            message:
+              type: string
+            code:
+              $ref: '#/components/schemas/ErrorCode'
+            status:
+              type: integer
+            data:
+              type: object
+              description: For `BAD_USER_INPUT`, `fields` maps each field to its message.
+              additionalProperties: true
+  responses:
+    AuthTokenResponse:
+      description: A JWT for the account
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - authToken
+            properties:
+              authToken:
+                type: string
+                description: JWT with the user id in `sub`.
+          example:
+            authToken: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOjMsImlhdCI6MTcwMDAwMDAwMH0.signature
+    BadUserInput:
+      description: Validation failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              message: There were validation errors.
+              code: BAD_USER_INPUT
+              status: 400
+              data:
+                fields:
+                  title: This field is required
+    InvalidToken:
+      description: Token missing, invalid or expired, or its user no longer exists
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              message: Authentication token not found.
+              code: INVALID_TOKEN
+              status: 401
+              data: {}
+    NotFound:
+      description: Entity or route not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              message: Issue not found.
+              code: ENTITY_NOT_FOUND
+              status: 404
+              data: {}
+    InternalError:
+      description: Unexpected failure (also returned for malformed JSON bodies)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              message: Something went wrong, please contact our support.
+              code: INTERNAL_ERROR
+              status: 500
+              data: {}
+  parameters:
+    issueId:
+      name: issueId
+      in: path
+      required: true
+      schema:
+        type: integer
+    commentId:
+      name: commentId
+      in: path
+      required: true
+      schema:
+        type: integer
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT from `POST /authentication/guest`.

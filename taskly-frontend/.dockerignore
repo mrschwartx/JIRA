@@ -1,0 +1,12 @@
+node_modules
+.next
+coverage
+.git
+*.md
+.env*
+e2e
+playwright-report
+test-results
+playwright.config.ts
+**/*.test.ts
+**/*.test.tsx
