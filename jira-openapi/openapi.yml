@@ -1,951 +1,1217 @@
 openapi: 3.1.0
 info:
-  title: Jira Clone API
+  title: Jira API
   description: |
-    REST API for the simplified Jira clone (Express + TypeORM + PostgreSQL).
+    REST API for a Jira style project and issue tracker, built on Express and PostgreSQL.
 
-    **Auth.** No login: `POST /authentication/guest` creates a guest account and returns a JWT (180 days).
-    Send it as `Authorization: Bearer <token>`. Each user belongs to one project, and `/project` and
-    `GET /issues` are scoped to it.
+    Authentication uses an HttpOnly cookie named jira_token that is set by sign up and sign in
+    and lasts one hour. Clients must send requests with credentials included.
 
-    **Conventions.** All successes return `200` with JSON (deleted entities have no `id`). All errors
-    return `{ "error": { message, code, status, data } }`. Timestamps are ISO 8601.
+    Projects are the unit of access control. A user can only see and change a project when they
+    are a member of it. Requests for projects the caller does not belong to answer 404, exactly as
+    if the project did not exist. Only the owner can change or delete a project and manage members.
 
-    **Known limitations.** No ownership checks on issues or comments; `userId` and `projectId` are
-    trusted from the body; `PUT` assigns any field sent; issue `description` is unsanitized HTML; the
-    guest endpoint is not rate limited.
+    Errors share one shape: an object with a numeric status and a human readable message.
+    Sign up and sign in are rate limited per client address and answer 429 when the limit is hit.
   contact:
-    name: Ivor Reic
-    url: https://github.com/oldboyxx/jira_clone
+    name: Jira
   license:
     name: MIT License
     url: https://opensource.org/licenses/MIT
-  version: 1.0.0
+  version: 3.0.0
 tags:
-- name: Authentication
-- name: Current User
-- name: Project
-- name: Issues
-- name: Comments
-- name: Test
-  description: Only mounted when `NODE_ENV=test`.
+  - name: Auth
+  - name: Users
+  - name: Projects
+  - name: Members
+  - name: Issues
+  - name: Comments
+  - name: System
 servers:
-- url: http://localhost:3000
-  description: Local development
+  - url: http://localhost:8080/api/v1
 security:
-- BearerAuth: []
+  - CookieAuth: []
 paths:
-  /authentication/guest:
-    post:
-      tags:
-      - Authentication
-      summary: Create a guest account
-      description: Seeds a project with 3 users, 8 issues and 8 comments.
-      operationId: createGuestAccount
-      security: []
-      responses:
-        '200':
-          $ref: '#/components/responses/AuthTokenResponse'
-        '500':
-          $ref: '#/components/responses/InternalError'
-  /currentUser:
+  /:
     get:
       tags:
-      - Current User
-      summary: Get the authenticated user
+        - System
+      summary: Service health
+      description: Returns a welcome message. Used as the container health check.
+      operationId: getHealth
+      security: []
+      servers:
+        - url: http://localhost:8080
+      responses:
+        '200':
+          description: The service is running
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - message
+                properties:
+                  message:
+                    type: string
+              example:
+                message: Welcome to the Jira API
+  /auth/signup:
+    post:
+      tags:
+        - Auth
+      summary: Register a new user
+      operationId: signUp
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignUpRequest'
+      responses:
+        '201':
+          description: The user was created and signed in
+          headers:
+            Set-Cookie:
+              $ref: '#/components/headers/SessionCookie'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '422':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /auth/signin:
+    post:
+      tags:
+        - Auth
+      summary: Sign in
+      description: Unknown emails and wrong passwords answer with the same 401 message.
+      operationId: signIn
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignInRequest'
+      responses:
+        '200':
+          description: The user was signed in
+          headers:
+            Set-Cookie:
+              $ref: '#/components/headers/SessionCookie'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /auth/signout:
+    post:
+      tags:
+        - Auth
+      summary: Sign out
+      description: Clears the session cookie.
+      operationId: signOut
+      security: []
+      responses:
+        '204':
+          $ref: '#/components/responses/NoContent'
+  /auth/me:
+    get:
+      tags:
+        - Auth
+      summary: Get the signed in user
       operationId: getCurrentUser
       responses:
         '200':
-          description: The authenticated user
+          description: The signed in user
           content:
             application/json:
               schema:
-                type: object
-                required:
-                - currentUser
-                properties:
-                  currentUser:
-                    $ref: '#/components/schemas/User'
+                $ref: '#/components/schemas/User'
         '401':
-          $ref: '#/components/responses/InvalidToken'
-  /project:
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /users:
     get:
       tags:
-      - Project
-      summary: Get the current user's project
+        - Users
+      summary: Search users
+      description: Case insensitive substring search over username and email. Returns at most 20 users.
+      operationId: searchUsers
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 2
+            maxLength: 100
+      responses:
+        '200':
+          description: Matching users, possibly empty
+          content:
+            application/json:
+              schema:
+                type: array
+                maxItems: 20
+                items:
+                  $ref: '#/components/schemas/User'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /users/{userId}:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    get:
+      tags:
+        - Users
+      summary: Get a user
+      operationId: getUser
+      responses:
+        '200':
+          description: The user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags:
+        - Users
+      summary: Update your own account
+      description: Fields other than username, email and password are ignored. Other accounts answer 401.
+      operationId: updateUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateUserRequest'
+      responses:
+        '200':
+          description: The updated user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Conflict'
+    delete:
+      tags:
+        - Users
+      summary: Delete your own account
+      description: Ends the session and removes the avatar. Owned projects are deleted with the account.
+      operationId: deleteUser
+      responses:
+        '204':
+          $ref: '#/components/responses/NoContent'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /users/{userId}/avatar:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    put:
+      tags:
+        - Users
+      summary: Replace your own avatar
+      description: Accepts one JPEG, PNG, WEBP or GIF image of at most 2 MB in the avatar field.
+      operationId: uploadAvatar
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - avatar
+              properties:
+                avatar:
+                  type: string
+                  contentEncoding: binary
+      responses:
+        '200':
+          description: The updated user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /projects:
+    get:
+      tags:
+        - Projects
+      summary: List your projects
+      description: Every project the signed in user is a member of, oldest first.
+      operationId: listProjects
+      responses:
+        '200':
+          description: Projects of the user
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Project'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags:
+        - Projects
+      summary: Create a project
+      description: The creator becomes the owner and first member. The key must be unique.
+      operationId: createProject
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateProjectRequest'
+      responses:
+        '201':
+          description: The created project
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/Conflict'
+  /projects/{projectId}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags:
+        - Projects
+      summary: Get a project
       operationId: getProject
       responses:
         '200':
-          description: Project with users and issues
+          description: The project with the role of the caller
           content:
             application/json:
               schema:
-                type: object
-                required:
-                - project
-                properties:
-                  project:
-                    $ref: '#/components/schemas/ProjectWithUsersAndIssues'
+                $ref: '#/components/schemas/Project'
+        '400':
+          $ref: '#/components/responses/ValidationError'
         '401':
-          $ref: '#/components/responses/InvalidToken'
+          $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
-    put:
+    patch:
       tags:
-      - Project
-      summary: Update the current user's project
+        - Projects
+      summary: Update a project
+      description: Owner only. The key cannot be changed and is ignored.
       operationId: updateProject
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/ProjectUpdate'
+              $ref: '#/components/schemas/UpdateProjectRequest'
       responses:
         '200':
           description: The updated project
           content:
             application/json:
               schema:
-                type: object
-                required:
-                - project
-                properties:
-                  project:
-                    $ref: '#/components/schemas/Project'
+                $ref: '#/components/schemas/Project'
         '400':
-          $ref: '#/components/responses/BadUserInput'
+          $ref: '#/components/responses/ValidationError'
         '401':
-          $ref: '#/components/responses/InvalidToken'
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
-  /issues:
+    delete:
+      tags:
+        - Projects
+      summary: Delete a project
+      description: Owner only. Issues, comments and memberships are deleted with it.
+      operationId: deleteProject
+      responses:
+        '204':
+          $ref: '#/components/responses/NoContent'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /projects/{projectId}/members:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
     get:
       tags:
-      - Issues
-      summary: List or search the project's issues
-      description: Case-insensitive `ILIKE` on title and description text. `%` and `_` are not escaped
-        and act as wildcards.
-      operationId: getIssues
+        - Members
+      summary: List project members
+      description: The owner comes first, then members by username.
+      operationId: listMembers
+      responses:
+        '200':
+          description: Members of the project
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Member'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags:
+        - Members
+      summary: Add a member
+      description: Owner only. Use the user search to find the id of the person to add.
+      operationId: addMember
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddMemberRequest'
+      responses:
+        '201':
+          description: The new member
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Member'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Conflict'
+  /projects/{projectId}/members/{userId}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/UserId'
+    delete:
+      tags:
+        - Members
+      summary: Remove a member
+      description: >-
+        The owner can remove any member. Members can only remove themselves. The owner can never be
+        removed. Removing a member unassigns them from every issue of the project.
+      operationId: removeMember
+      responses:
+        '204':
+          $ref: '#/components/responses/NoContent'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /projects/{projectId}/issues:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags:
+        - Issues
+      summary: List or search issues
+      description: >-
+        Returns issues ordered by list position, at most 1000. The search term matches the title and
+        description case insensitively and treats percent and underscore literally.
+      operationId: listIssues
       parameters:
-      - name: searchTerm
-        in: query
-        required: false
-        schema:
-          type: string
+        - name: search
+          in: query
+          schema:
+            type: string
+            maxLength: 100
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/IssueStatus'
+        - name: type
+          in: query
+          schema:
+            $ref: '#/components/schemas/IssueType'
+        - name: assigneeId
+          in: query
+          schema:
+            type: string
+            format: uuid
       responses:
         '200':
           description: Matching issues
           content:
             application/json:
               schema:
-                type: object
-                required:
-                - issues
-                properties:
-                  issues:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/Issue'
+                type: array
+                maxItems: 1000
+                items:
+                  $ref: '#/components/schemas/Issue'
+        '400':
+          $ref: '#/components/responses/ValidationError'
         '401':
-          $ref: '#/components/responses/InvalidToken'
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
     post:
       tags:
-      - Issues
+        - Issues
       summary: Create an issue
-      description: Any `listPosition` sent is ignored; the issue is placed at the top of its column.
+      description: >-
+        The issue gets the next number of the project and is placed at the top of its column. Any
+        list position, number or project id in the body is ignored. The reporter defaults to the
+        caller. Reporter and assignees must be project members.
       operationId: createIssue
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/IssueCreate'
-            example:
-              title: Fix login redirect
-              type: bug
-              status: backlog
-              priority: '4'
-              description: <p>Users land on a blank page.</p>
-              reporterId: 3
-              projectId: 1
-              users:
-              - id: 2
+              $ref: '#/components/schemas/CreateIssueRequest'
       responses:
-        '200':
+        '201':
           description: The created issue
           content:
             application/json:
               schema:
-                type: object
-                required:
-                - issue
-                properties:
-                  issue:
-                    $ref: '#/components/schemas/Issue'
+                $ref: '#/components/schemas/Issue'
         '400':
-          $ref: '#/components/responses/BadUserInput'
+          $ref: '#/components/responses/ValidationError'
         '401':
-          $ref: '#/components/responses/InvalidToken'
-  /issues/{issueId}:
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /projects/{projectId}/issues/{issueId}:
     parameters:
-    - $ref: '#/components/parameters/issueId'
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/IssueId'
     get:
       tags:
-      - Issues
-      summary: Get an issue with its assignees and comments
+        - Issues
+      summary: Get an issue
       operationId: getIssue
       responses:
         '200':
-          description: The issue with `users` and `comments` (each with its `user`)
+          description: The issue
           content:
             application/json:
               schema:
-                type: object
-                required:
-                - issue
-                properties:
-                  issue:
-                    $ref: '#/components/schemas/IssueWithUsersAndComments'
+                $ref: '#/components/schemas/Issue'
+        '400':
+          $ref: '#/components/responses/ValidationError'
         '401':
-          $ref: '#/components/responses/InvalidToken'
+          $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
-    put:
+    patch:
       tags:
-      - Issues
+        - Issues
       summary: Update an issue
-      description: Partial update. Sending `users` replaces the assignees.
+      description: >-
+        Partial update used for inline edits and for dragging cards, which sends a status and a list
+        position. Sending assigneeIds replaces the assignees. Time values accept null to clear them.
+        Unknown fields are ignored.
       operationId: updateIssue
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/IssueUpdate'
-            examples:
-              dragAndDrop:
-                summary: Move an issue to another column
-                value:
-                  status: inprogress
-                  listPosition: 2.5
-              assignees:
-                summary: Replace assignees
-                value:
-                  users:
-                  - id: 1
-                  - id: 3
+              $ref: '#/components/schemas/UpdateIssueRequest'
       responses:
         '200':
           description: The updated issue
           content:
             application/json:
               schema:
-                type: object
-                required:
-                - issue
-                properties:
-                  issue:
-                    $ref: '#/components/schemas/Issue'
+                $ref: '#/components/schemas/Issue'
         '400':
-          $ref: '#/components/responses/BadUserInput'
+          $ref: '#/components/responses/ValidationError'
         '401':
-          $ref: '#/components/responses/InvalidToken'
+          $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
     delete:
       tags:
-      - Issues
+        - Issues
       summary: Delete an issue
-      description: Its comments are deleted by cascade.
+      description: Comments are deleted with the issue.
       operationId: deleteIssue
       responses:
+        '204':
+          $ref: '#/components/responses/NoContent'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /projects/{projectId}/issues/{issueId}/comments:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/IssueId'
+    get:
+      tags:
+        - Comments
+      summary: List comments of an issue
+      description: Newest first.
+      operationId: listComments
+      responses:
         '200':
-          description: The deleted issue (without `id`)
+          description: Comments of the issue
           content:
             application/json:
               schema:
-                type: object
-                required:
-                - issue
-                properties:
-                  issue:
-                    $ref: '#/components/schemas/DeletedIssue'
+                type: array
+                items:
+                  $ref: '#/components/schemas/Comment'
+        '400':
+          $ref: '#/components/responses/ValidationError'
         '401':
-          $ref: '#/components/responses/InvalidToken'
+          $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
-  /comments:
     post:
       tags:
-      - Comments
-      summary: Create a comment
+        - Comments
+      summary: Comment on an issue
+      description: The author is always the caller.
       operationId: createComment
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/CommentCreate'
+              $ref: '#/components/schemas/CommentRequest'
       responses:
-        '200':
+        '201':
           description: The created comment
           content:
             application/json:
               schema:
-                type: object
-                required:
-                - comment
-                properties:
-                  comment:
-                    $ref: '#/components/schemas/Comment'
+                $ref: '#/components/schemas/Comment'
         '400':
-          $ref: '#/components/responses/BadUserInput'
+          $ref: '#/components/responses/ValidationError'
         '401':
-          $ref: '#/components/responses/InvalidToken'
-  /comments/{commentId}:
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /projects/{projectId}/issues/{issueId}/comments/{commentId}:
     parameters:
-    - $ref: '#/components/parameters/commentId'
-    put:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/IssueId'
+      - $ref: '#/components/parameters/CommentId'
+    patch:
       tags:
-      - Comments
-      summary: Update a comment
+        - Comments
+      summary: Edit a comment
+      description: Only the author can edit a comment.
       operationId: updateComment
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/CommentUpdate'
+              $ref: '#/components/schemas/CommentRequest'
       responses:
         '200':
           description: The updated comment
           content:
             application/json:
               schema:
-                type: object
-                required:
-                - comment
-                properties:
-                  comment:
-                    $ref: '#/components/schemas/Comment'
+                $ref: '#/components/schemas/Comment'
         '400':
-          $ref: '#/components/responses/BadUserInput'
+          $ref: '#/components/responses/ValidationError'
         '401':
-          $ref: '#/components/responses/InvalidToken'
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
     delete:
       tags:
-      - Comments
+        - Comments
       summary: Delete a comment
+      description: The author or the project owner can delete a comment.
       operationId: deleteComment
       responses:
-        '200':
-          description: The deleted comment (without `id`)
-          content:
-            application/json:
-              schema:
-                type: object
-                required:
-                - comment
-                properties:
-                  comment:
-                    $ref: '#/components/schemas/DeletedComment'
+        '204':
+          $ref: '#/components/responses/NoContent'
+        '400':
+          $ref: '#/components/responses/ValidationError'
         '401':
-          $ref: '#/components/responses/InvalidToken'
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
-  /test/reset-database:
-    delete:
-      tags:
-      - Test
-      summary: Drop and recreate the database schema
-      description: Test mode only. Destroys all data.
-      operationId: resetDatabase
-      security: []
-      responses:
-        '200':
-          description: Database was reset
-          content:
-            application/json:
-              schema:
-                type: boolean
-                const: true
-        '500':
-          $ref: '#/components/responses/InternalError'
-  /test/create-account:
-    post:
-      tags:
-      - Test
-      summary: Create a deterministic test account
-      description: Test mode only. Seeds 2 users, 1 project, 3 issues and 1 comment.
-      operationId: createTestAccount
-      security: []
-      responses:
-        '200':
-          $ref: '#/components/responses/AuthTokenResponse'
-        '500':
-          $ref: '#/components/responses/InternalError'
 components:
-  schemas:
-    IssueType:
-      type: string
-      enum:
-      - task
-      - bug
-      - story
-    IssueStatus:
-      type: string
-      enum:
-      - backlog
-      - selected
-      - inprogress
-      - done
-    IssuePriority:
-      type: string
-      description: 5 = highest, 1 = lowest.
-      enum:
-      - '5'
-      - '4'
-      - '3'
-      - '2'
-      - '1'
-    ProjectCategory:
-      type: string
-      enum:
-      - software
-      - marketing
-      - business
-    User:
-      type: object
-      required:
-      - id
-      - name
-      - email
-      - avatarUrl
-      - createdAt
-      - updatedAt
-      - projectId
-      properties:
-        id:
-          type: integer
-        name:
-          type: string
-          maxLength: 100
-        email:
-          type: string
-          maxLength: 200
-        avatarUrl:
-          type: string
-          maxLength: 2000
-        createdAt:
-          type: string
-          format: date-time
-        updatedAt:
-          type: string
-          format: date-time
-        projectId:
-          type: integer
-    Project:
-      type: object
-      required:
-      - id
-      - name
-      - url
-      - description
-      - category
-      - createdAt
-      - updatedAt
-      properties:
-        id:
-          type: integer
-        name:
-          type: string
-          maxLength: 100
-        url:
-          type:
-          - string
-          - 'null'
-        description:
-          type:
-          - string
-          - 'null'
-          description: HTML produced by the rich-text editor.
-        category:
-          $ref: '#/components/schemas/ProjectCategory'
-        createdAt:
-          type: string
-          format: date-time
-        updatedAt:
-          type: string
-          format: date-time
-    ProjectWithUsersAndIssues:
-      allOf:
-      - $ref: '#/components/schemas/Project'
-      - type: object
-        required:
-        - users
-        - issues
-        properties:
-          users:
-            type: array
-            items:
-              $ref: '#/components/schemas/User'
-          issues:
-            type: array
-            items:
-              $ref: '#/components/schemas/IssuePartial'
-    ProjectUpdate:
-      type: object
-      properties:
-        name:
-          type: string
-          minLength: 1
-          maxLength: 100
-        url:
-          type:
-          - string
-          - 'null'
-          description: Must match the server's URL pattern (scheme optional) when present.
-        description:
-          type:
-          - string
-          - 'null'
-        category:
-          $ref: '#/components/schemas/ProjectCategory'
-    IssuePartial:
-      type: object
-      required:
-      - id
-      - title
-      - type
-      - status
-      - priority
-      - listPosition
-      - createdAt
-      - updatedAt
-      - userIds
-      properties:
-        id:
-          type: integer
-        title:
-          type: string
-        type:
-          $ref: '#/components/schemas/IssueType'
-        status:
-          $ref: '#/components/schemas/IssueStatus'
-        priority:
-          $ref: '#/components/schemas/IssuePriority'
-        listPosition:
-          type: number
-          format: double
-        createdAt:
-          type: string
-          format: date-time
-        updatedAt:
-          type: string
-          format: date-time
-        userIds:
-          type: array
-          description: IDs of the assignees.
-          items:
-            type: integer
-    IssueFields:
-      type: object
-      properties:
-        id:
-          type: integer
-        title:
-          type: string
-          maxLength: 200
-        type:
-          $ref: '#/components/schemas/IssueType'
-        status:
-          $ref: '#/components/schemas/IssueStatus'
-        priority:
-          $ref: '#/components/schemas/IssuePriority'
-        listPosition:
-          type: number
-          format: double
-          description: Ascending sort key within a status column.
-        description:
-          type:
-          - string
-          - 'null'
-          description: Unsanitized HTML from the rich-text editor.
-        descriptionText:
-          type:
-          - string
-          - 'null'
-          description: Tag-stripped `description` used by search.
-        estimate:
-          type:
-          - integer
-          - 'null'
-          description: Original estimate in hours.
-        timeSpent:
-          type:
-          - integer
-          - 'null'
-          description: Logged time in hours.
-        timeRemaining:
-          type:
-          - integer
-          - 'null'
-          description: Remaining time in hours.
-        createdAt:
-          type: string
-          format: date-time
-        updatedAt:
-          type: string
-          format: date-time
-        reporterId:
-          type: integer
-        projectId:
-          type: integer
-        userIds:
-          type: array
-          description: Assignee IDs (may be absent on some list responses).
-          items:
-            type: integer
-    Issue:
-      allOf:
-      - $ref: '#/components/schemas/IssueFields'
-      - type: object
-        required:
-        - id
-        - title
-        - type
-        - status
-        - priority
-        - listPosition
-        - description
-        - descriptionText
-        - estimate
-        - timeSpent
-        - timeRemaining
-        - createdAt
-        - updatedAt
-        - reporterId
-        - projectId
-    DeletedIssue:
-      description: The deleted issue. `id` is omitted.
-      allOf:
-      - $ref: '#/components/schemas/IssueFields'
-      - type: object
-        required:
-        - title
-        - type
-        - status
-        - priority
-        - listPosition
-        - description
-        - descriptionText
-        - estimate
-        - timeSpent
-        - timeRemaining
-        - createdAt
-        - updatedAt
-        - reporterId
-        - projectId
-    IssueWithUsersAndComments:
-      allOf:
-      - $ref: '#/components/schemas/Issue'
-      - type: object
-        required:
-        - users
-        - comments
-        properties:
-          users:
-            type: array
-            items:
-              $ref: '#/components/schemas/User'
-          comments:
-            type: array
-            items:
-              $ref: '#/components/schemas/CommentWithUser'
-    IssueCreate:
-      type: object
-      required:
-      - title
-      - type
-      - status
-      - priority
-      - reporterId
-      - projectId
-      properties:
-        title:
-          type: string
-          minLength: 1
-          maxLength: 200
-        type:
-          $ref: '#/components/schemas/IssueType'
-        status:
-          $ref: '#/components/schemas/IssueStatus'
-        priority:
-          $ref: '#/components/schemas/IssuePriority'
-        description:
-          type:
-          - string
-          - 'null'
-        estimate:
-          type:
-          - integer
-          - 'null'
-        timeSpent:
-          type:
-          - integer
-          - 'null'
-        timeRemaining:
-          type:
-          - integer
-          - 'null'
-        reporterId:
-          type: integer
-        projectId:
-          type: integer
-          description: Taken from the body as-is (not derived from the caller).
-        users:
-          type: array
-          description: Assignees as objects with only `id`.
-          items:
-            type: object
-            required:
-            - id
-            properties:
-              id:
-                type: integer
-    IssueUpdate:
-      type: object
-      properties:
-        title:
-          type: string
-          minLength: 1
-          maxLength: 200
-        type:
-          $ref: '#/components/schemas/IssueType'
-        status:
-          $ref: '#/components/schemas/IssueStatus'
-        priority:
-          $ref: '#/components/schemas/IssuePriority'
-        listPosition:
-          type: number
-          format: double
-        description:
-          type:
-          - string
-          - 'null'
-        estimate:
-          type:
-          - integer
-          - 'null'
-        timeSpent:
-          type:
-          - integer
-          - 'null'
-        timeRemaining:
-          type:
-          - integer
-          - 'null'
-        reporterId:
-          type: integer
-        users:
-          type: array
-          items:
-            type: object
-            required:
-            - id
-            properties:
-              id:
-                type: integer
-    CommentFields:
-      type: object
-      properties:
-        id:
-          type: integer
-        body:
-          type: string
-          description: Plain text.
-          maxLength: 50000
-        createdAt:
-          type: string
-          format: date-time
-        updatedAt:
-          type: string
-          format: date-time
-        userId:
-          type: integer
-        issueId:
-          type: integer
-    Comment:
-      allOf:
-      - $ref: '#/components/schemas/CommentFields'
-      - type: object
-        required:
-        - id
-        - body
-        - createdAt
-        - updatedAt
-        - userId
-        - issueId
-    DeletedComment:
-      description: The deleted comment. `id` is omitted.
-      allOf:
-      - $ref: '#/components/schemas/CommentFields'
-      - type: object
-        required:
-        - body
-        - createdAt
-        - updatedAt
-        - userId
-        - issueId
-    CommentWithUser:
-      allOf:
-      - $ref: '#/components/schemas/Comment'
-      - type: object
-        required:
-        - user
-        properties:
-          user:
-            $ref: '#/components/schemas/User'
-    CommentCreate:
-      type: object
-      required:
-      - body
-      - issueId
-      - userId
-      properties:
-        body:
-          type: string
-          minLength: 1
-          maxLength: 50000
-        issueId:
-          type: integer
-        userId:
-          type: integer
-          description: Taken from the body as-is (not derived from the caller).
-    CommentUpdate:
-      type: object
-      required:
-      - body
-      properties:
-        body:
-          type: string
-          minLength: 1
-          maxLength: 50000
-    ErrorCode:
-      type: string
-      enum:
-      - INVALID_TOKEN
-      - BAD_USER_INPUT
-      - ENTITY_NOT_FOUND
-      - ROUTE_NOT_FOUND
-      - INTERNAL_ERROR
-    ErrorResponse:
-      type: object
-      required:
-      - error
-      properties:
-        error:
-          type: object
-          required:
-          - message
-          - code
-          - status
-          - data
-          properties:
-            message:
-              type: string
-            code:
-              $ref: '#/components/schemas/ErrorCode'
-            status:
-              type: integer
-            data:
-              type: object
-              description: For `BAD_USER_INPUT`, `fields` maps each field to its message.
-              additionalProperties: true
-  responses:
-    AuthTokenResponse:
-      description: A JWT for the account
-      content:
-        application/json:
-          schema:
-            type: object
-            required:
-            - authToken
-            properties:
-              authToken:
-                type: string
-                description: JWT with the user id in `sub`.
-          example:
-            authToken: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOjMsImlhdCI6MTcwMDAwMDAwMH0.signature
-    BadUserInput:
-      description: Validation failed
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/ErrorResponse'
-          example:
-            error:
-              message: There were validation errors.
-              code: BAD_USER_INPUT
-              status: 400
-              data:
-                fields:
-                  title: This field is required
-    InvalidToken:
-      description: Token missing, invalid or expired, or its user no longer exists
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/ErrorResponse'
-          example:
-            error:
-              message: Authentication token not found.
-              code: INVALID_TOKEN
-              status: 401
-              data: {}
-    NotFound:
-      description: Entity or route not found
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/ErrorResponse'
-          example:
-            error:
-              message: Issue not found.
-              code: ENTITY_NOT_FOUND
-              status: 404
-              data: {}
-    InternalError:
-      description: Unexpected failure (also returned for malformed JSON bodies)
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/ErrorResponse'
-          example:
-            error:
-              message: Something went wrong, please contact our support.
-              code: INTERNAL_ERROR
-              status: 500
-              data: {}
+  securitySchemes:
+    CookieAuth:
+      type: apiKey
+      in: cookie
+      name: jira_token
+      description: HttpOnly session cookie issued by sign up and sign in.
+  headers:
+    SessionCookie:
+      description: Sets the jira_token session cookie, HttpOnly and valid for one hour.
+      schema:
+        type: string
   parameters:
-    issueId:
+    UserId:
+      name: userId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ProjectId:
+      name: projectId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    IssueId:
       name: issueId
       in: path
       required: true
       schema:
-        type: integer
-    commentId:
+        type: string
+        format: uuid
+    CommentId:
       name: commentId
       in: path
       required: true
       schema:
-        type: integer
-  securitySchemes:
-    BearerAuth:
-      type: http
-      scheme: bearer
-      bearerFormat: JWT
-      description: JWT from `POST /authentication/guest`.
+        type: string
+        format: uuid
+  schemas:
+    Error:
+      type: object
+      required:
+        - message
+      properties:
+        status:
+          type: integer
+        message:
+          type: string
+    User:
+      type: object
+      required:
+        - id
+        - username
+        - email
+        - avatar
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+          minLength: 3
+          maxLength: 50
+        email:
+          type: string
+          maxLength: 254
+        avatar:
+          type: string
+          description: Path of the avatar on the API origin.
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    SignUpRequest:
+      type: object
+      required:
+        - username
+        - email
+        - password
+      properties:
+        username:
+          type: string
+          minLength: 3
+          maxLength: 50
+        email:
+          type: string
+          maxLength: 254
+        password:
+          type: string
+          format: password
+          minLength: 8
+          maxLength: 72
+    SignInRequest:
+      type: object
+      required:
+        - email
+        - password
+      properties:
+        email:
+          type: string
+        password:
+          type: string
+          format: password
+    UpdateUserRequest:
+      type: object
+      minProperties: 1
+      properties:
+        username:
+          type: string
+          minLength: 3
+          maxLength: 50
+        email:
+          type: string
+          maxLength: 254
+        password:
+          type: string
+          format: password
+          minLength: 8
+          maxLength: 72
+    ProjectCategory:
+      type: string
+      enum:
+        - software
+        - marketing
+        - business
+    MemberRole:
+      type: string
+      enum:
+        - owner
+        - member
+    Project:
+      type: object
+      required:
+        - id
+        - key
+        - name
+        - url
+        - description
+        - category
+        - ownerId
+        - role
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        key:
+          type: string
+          pattern: ^[A-Z][A-Z0-9]{1,9}$
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        url:
+          type:
+            - string
+            - 'null'
+          maxLength: 2048
+        description:
+          type: string
+          maxLength: 10000
+        category:
+          $ref: '#/components/schemas/ProjectCategory'
+        ownerId:
+          type: string
+          format: uuid
+        role:
+          $ref: '#/components/schemas/MemberRole'
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    CreateProjectRequest:
+      type: object
+      required:
+        - key
+        - name
+      properties:
+        key:
+          type: string
+          description: Two to ten letters or digits starting with a letter. Lower case input is upper cased.
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        category:
+          $ref: '#/components/schemas/ProjectCategory'
+        url:
+          type:
+            - string
+            - 'null'
+          description: An http or https URL.
+        description:
+          type: string
+          maxLength: 10000
+    UpdateProjectRequest:
+      type: object
+      minProperties: 1
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        category:
+          $ref: '#/components/schemas/ProjectCategory'
+        url:
+          type:
+            - string
+            - 'null'
+        description:
+          type: string
+          maxLength: 10000
+    Member:
+      type: object
+      required:
+        - id
+        - username
+        - email
+        - avatar
+        - role
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        email:
+          type: string
+        avatar:
+          type: string
+        role:
+          $ref: '#/components/schemas/MemberRole'
+    AddMemberRequest:
+      type: object
+      required:
+        - userId
+      properties:
+        userId:
+          type: string
+          format: uuid
+    IssueType:
+      type: string
+      enum:
+        - task
+        - bug
+        - story
+    IssueStatus:
+      type: string
+      description: The board column of the issue.
+      enum:
+        - backlog
+        - selected
+        - inprogress
+        - done
+    IssuePriority:
+      type: string
+      enum:
+        - lowest
+        - low
+        - medium
+        - high
+        - highest
+    Hours:
+      type:
+        - integer
+        - 'null'
+      minimum: 0
+      maximum: 10000
+    Issue:
+      type: object
+      required:
+        - id
+        - projectId
+        - number
+        - title
+        - type
+        - status
+        - priority
+        - listPosition
+        - description
+        - estimate
+        - timeSpent
+        - timeRemaining
+        - reporterId
+        - assigneeIds
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        projectId:
+          type: string
+          format: uuid
+        number:
+          type: integer
+          minimum: 1
+          description: Sequence number inside the project. Combine it with the project key, for example JIRA-12.
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        type:
+          $ref: '#/components/schemas/IssueType'
+        status:
+          $ref: '#/components/schemas/IssueStatus'
+        priority:
+          $ref: '#/components/schemas/IssuePriority'
+        listPosition:
+          type: number
+          description: Ascending sort key inside a column. Place a card between two others by using the midpoint of their positions.
+        description:
+          type: string
+          maxLength: 20000
+          description: Plain text. Clients must render it as text and never as HTML.
+        estimate:
+          $ref: '#/components/schemas/Hours'
+        timeSpent:
+          $ref: '#/components/schemas/Hours'
+        timeRemaining:
+          $ref: '#/components/schemas/Hours'
+        reporterId:
+          type:
+            - string
+            - 'null'
+          format: uuid
+          description: Null after the reporter deleted their account.
+        assigneeIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    CreateIssueRequest:
+      type: object
+      required:
+        - title
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        type:
+          $ref: '#/components/schemas/IssueType'
+        status:
+          $ref: '#/components/schemas/IssueStatus'
+        priority:
+          $ref: '#/components/schemas/IssuePriority'
+        description:
+          type: string
+          maxLength: 20000
+        estimate:
+          $ref: '#/components/schemas/Hours'
+        timeSpent:
+          $ref: '#/components/schemas/Hours'
+        timeRemaining:
+          $ref: '#/components/schemas/Hours'
+        reporterId:
+          type: string
+          format: uuid
+        assigneeIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+    UpdateIssueRequest:
+      type: object
+      minProperties: 1
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        type:
+          $ref: '#/components/schemas/IssueType'
+        status:
+          $ref: '#/components/schemas/IssueStatus'
+        priority:
+          $ref: '#/components/schemas/IssuePriority'
+        listPosition:
+          type: number
+        description:
+          type: string
+          maxLength: 20000
+        estimate:
+          $ref: '#/components/schemas/Hours'
+        timeSpent:
+          $ref: '#/components/schemas/Hours'
+        timeRemaining:
+          $ref: '#/components/schemas/Hours'
+        reporterId:
+          type: string
+          format: uuid
+        assigneeIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+    CommentAuthor:
+      type: object
+      required:
+        - id
+        - username
+        - avatar
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        avatar:
+          type: string
+    Comment:
+      type: object
+      required:
+        - id
+        - issueId
+        - body
+        - author
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        issueId:
+          type: string
+          format: uuid
+        body:
+          type: string
+          minLength: 1
+          maxLength: 5000
+        author:
+          description: Null after the author deleted their account.
+          oneOf:
+            - $ref: '#/components/schemas/CommentAuthor'
+            - type: 'null'
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    CommentRequest:
+      type: object
+      required:
+        - body
+      properties:
+        body:
+          type: string
+          minLength: 1
+          maxLength: 5000
+  responses:
+    NoContent:
+      description: Success without a response body
+    ValidationError:
+      description: The request is malformed or violates a validation rule
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            status: 400
+            message: Issue title must be between 1 and 200 characters
+    Unauthorized:
+      description: The session cookie is missing, invalid or expired, or the credentials are wrong
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            status: 401
+            message: 'Unauthorized: Token not provided'
+    Forbidden:
+      description: The caller is a member but lacks the role needed for this action
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            status: 403
+            message: Only the project owner can update the project
+    NotFound:
+      description: The resource does not exist, or belongs to a project the caller is not a member of
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            status: 404
+            message: Project not found!
+    Conflict:
+      description: The resource already exists, for example a duplicate email, username or project key
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            status: 422
+            message: Project key is already in use.
+    TooManyRequests:
+      description: Too many authentication attempts from this client address
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            status: 429
+            message: Too many attempts. Please try again later.

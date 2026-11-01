@@ -1,17 +1,10 @@
 {
-    "folders": [
-        {
-            "name": "taskly-backend",
-            "path": "taskly-backend"
-        },
-        {
-            "name": "taskly-docker",
-            "path": "taskly-docker"
-        },
-        {
-            "name": ".",
-            "path": "."
-        }
-    ],
-    "settings": {}
+  "folders": [
+    { "name": "jira-backend", "path": "jira-backend" },
+    { "name": "jira-frontend", "path": "jira-frontend" },
+    { "name": "jira-docker", "path": "jira-docker" },
+    { "name": "jira-openapi", "path": "jira-openapi" },
+    { "name": ".", "path": "." }
+  ],
+  "settings": {}
 }

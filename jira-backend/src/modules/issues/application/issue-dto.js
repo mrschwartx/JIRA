@@ -1,0 +1,18 @@
+export const toIssueDto = (issue) => ({
+  id: issue.id,
+  projectId: issue.projectId,
+  number: issue.number,
+  title: issue.title.value,
+  type: issue.type.value,
+  status: issue.status.value,
+  priority: issue.priority.value,
+  listPosition: issue.listPosition,
+  description: issue.description.value,
+  estimate: issue.estimate,
+  timeSpent: issue.timeSpent,
+  timeRemaining: issue.timeRemaining,
+  reporterId: issue.reporterId,
+  assigneeIds: issue.assigneeIds,
+  createdAt: issue.createdAt,
+  updatedAt: issue.updatedAt,
+});

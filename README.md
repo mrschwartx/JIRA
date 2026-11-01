@@ -1,199 +1,271 @@
-# Taskly Backend (Express)
+# Jira
 
-A task manager backend: sign up and sign in, manage your profile and avatar, and create, filter, sort and paginate to-do tasks. It is a REST API built with Express 5 and PostgreSQL, organised as a modular monolith with Domain-Driven Design and Clean Architecture.
+A Jira style project and issue tracker. Teams create projects, invite members, and move issues across a drag and drop board, with assignees, priorities, time tracking and comments on every issue.
 
-The browser client is a separate Taskly frontend that talks to this API.
-
-**Stack:** Node.js 22 · Express 5 · PostgreSQL 18 · node-postgres · JWT · bcrypt · Multer · Winston · node:test · ESLint · Prettier · Docker · GitHub Actions
-
-## Contents
-
-- [Quick start](#quick-start)
-- [Features](#features)
-- [Configuration](#configuration)
-- [Architecture](#architecture)
-- [Database](#database)
-- [API](#api)
-- [Testing](#testing)
-- [CI](#ci)
-- [Limits](#limits)
-- [References](#references)
-
-## Quick start
-
-Requires Node.js 22+ and Docker.
-
-```sh
-cd taskly-docker
-make docker/dev-up
-cd ../taskly-backend
-cp .env.example .env
-npm ci
-npm run secret-key
-npm run dev
-```
-
-Paste the generated value into `AUTH_SECRET` in `.env`. The API runs at http://localhost:8080 and pgAdmin at http://localhost:8081 (login `admin@taskly.dev` / `admin`, server host `taskly-postgres`, user `dev_user`, password `dev_pass`). Migrations run automatically on startup.
-
-| Goal               | Command                                   |
-| ------------------ | ----------------------------------------- |
-| Run in development | `npm run dev`                             |
-| Run in production  | `npm start`                               |
-| Apply migrations   | `npm run migrate`                         |
-| Seed demo data     | `npm run seed`                            |
-| Run with Docker    | `make docker/up` (from `taskly-docker`)   |
-| Seed in Docker     | `make docker/seed` (from `taskly-docker`) |
-| Stop Docker        | `make docker/down` (from `taskly-docker`) |
-
-`make docker/up` creates `taskly-docker/.env` with a random database password and `AUTH_SECRET` on the first run, then starts PostgreSQL and the API and waits until both are healthy. `PORT` overrides the host port in the Docker setup. The container always listens on port 8080. Demo login after seeding: `johndoe123@mail.com` / `password123`.
+The repository is a monorepo with an Express API, a Next.js web app, a Docker stack, and an OpenAPI contract that is verified against the running API on every build.
 
 ## Features
 
-- **Authentication**: sign up, sign in and sign out with a JWT stored in an HTTP-only cookie.
-- **Users**: list users, update the profile, upload an avatar and delete the account.
-- **Tasks**: create, view, update and delete tasks.
-- **Listing**: filter by status, sort and paginate tasks.
-- **Platform**: versioned SQL migrations, structured logging, graceful shutdown, health check on `/` in the Docker image.
+- Accounts with sign up, sign in, sign out, profile editing and avatar upload
+- Projects with a unique key, a category, a URL and a description
+- Project membership with two roles: the owner manages the project and its members, members work on issues
+- Kanban board with four columns: backlog, selected for development, in progress and done
+- Drag and drop between and inside columns, with optimistic updates and rollback on failure
+- Issues numbered per project, for example JIRA-12, with type, priority, description, assignees, reporter, estimate, time spent and time remaining
+- Board filters by title, assignee, only my issues and recently updated
+- Issue search drawer that matches titles and descriptions
+- Comments on issues that the author can edit and that the author or the project owner can delete
+- Shareable links to an issue, opened as a dialog on top of the board
+
+## Repository layout
+
+```
+.github/          CI workflows, commitlint and Dependabot configuration
+jira-backend/     Express API, PostgreSQL migrations, tests
+jira-frontend/    Next.js application, tests
+jira-docker/      Dockerfiles, Docker Compose files, Makefile
+jira-openapi/     OpenAPI 3.1 specification and the contract test
+```
+
+## Tech stack
+
+| Area | Technology |
+| --- | --- |
+| API | Node.js 22, Express 5, PostgreSQL, JWT in an HttpOnly cookie, bcrypt, Helmet, express-rate-limit |
+| Web | Next.js 16 with the App Router, React 19, Chakra UI 3, TanStack Query, React Hook Form, hello-pangea/dnd |
+| Quality | node:test, Vitest, Testing Library, MSW, ESLint, Prettier |
+| Delivery | Docker, Docker Compose, GitHub Actions |
+
+## Quick start with Docker
+
+Requirements: Docker with Compose v2 and make.
+
+```bash
+cd jira-docker
+make docker/up
+make docker/seed
+```
+
+`make docker/up` creates `jira-docker/.env` with generated secrets on first run, builds the images and waits until every service is healthy.
+
+| Service | URL |
+| --- | --- |
+| Web app | http://localhost:3000 |
+| API | http://localhost:8080 |
+
+The seed creates the project JIRA with eight issues and three users: alice (owner), bob and carol, all with the password `password123`. Running it again changes nothing. The seed refuses to run when `APP_LEVEL` is `production`.
+
+Other targets: `make docker/logs`, `make docker/ps`, `make docker/down` and `make docker/clean`, which also removes volumes and local images.
+
+## Local development
+
+Start only PostgreSQL and pgAdmin:
+
+```bash
+cd jira-docker
+make docker/dev-up
+```
+
+PostgreSQL listens on port 5432 with the database `jira_dev`, user `dev_user` and password `dev_pass`. pgAdmin is at http://localhost:8081.
+
+Run the API:
+
+```bash
+cd jira-backend
+cp .env.example .env
+npm install
+npm run secret-key
+```
+
+Put the printed value into `AUTH_SECRET` in `.env`, then:
+
+```bash
+npm run dev
+npm run seed
+```
+
+Migrations are applied automatically at startup. `npm run migrate` applies them without starting the server.
+
+Run the web app:
+
+```bash
+cd jira-frontend
+cp .env.example .env.local
+npm install
+npm run dev
+```
 
 ## Configuration
 
-| Variable            | Default                 | Purpose                                  |
-| ------------------- | ----------------------- | ---------------------------------------- |
-| `APP_NAME`          | `taskly-api`            | Application name                         |
-| `APP_HOST`          | `0.0.0.0`               | Bind address                             |
-| `APP_PORT`          | `8080`                  | Port the API listens on                  |
-| `APP_LEVEL`         | `development`           | Environment level                        |
-| `DATABASE_URL`      | required                | PostgreSQL connection string             |
-| `DATABASE_POOL_MAX` | `10`                    | Maximum connections in the pool          |
-| `DATABASE_TIMEOUT`  | `30000`                 | Connection timeout in milliseconds       |
-| `AUTH_SECRET`       | required                | JWT secret, at least 32 characters       |
-| `COOKIE_DOMAIN`     | empty                   | Domain of the auth cookie                |
-| `BCRYPT_ROUNDS`     | `10`                    | bcrypt cost factor                       |
-| `CLIENT_URL`        | `http://localhost:3000` | Allowed CORS origin                      |
-| `LOG_LEVEL`         | `debug`                 | Log level                                |
-| `LOG_TO_FILE`       | `true`                  | Write logs to the `logs` directory       |
+### API
 
-Docker only, in `taskly-docker/.env`:
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DATABASE_URL` | required | PostgreSQL connection string |
+| `AUTH_SECRET` | required | Secret for signing tokens, at least 32 characters |
+| `APP_PORT` | 8080 | Port of the API |
+| `APP_LEVEL` | development | `production` enables secure cross-site cookies and blocks seeding |
+| `CLIENT_URL` | http://localhost:3000 | Origin allowed by CORS |
+| `COOKIE_DOMAIN` | empty | Domain of the session cookie |
+| `TRUST_PROXY` | 0 | Number of proxies in front of the API, needed for correct rate limiting |
+| `AUTH_RATE_LIMIT_MAX` | 20 | Sign up and sign in attempts per client address in the window |
+| `AUTH_RATE_LIMIT_WINDOW_MS` | 900000 | Length of the rate limit window |
+| `BCRYPT_ROUNDS` | 10 | Cost of password hashing |
+| `DATABASE_POOL_MAX` | 10 | Size of the connection pool |
+| `LOG_LEVEL` | debug, info in production | Log verbosity |
+| `LOG_TO_FILE` | true | Also write logs to the `logs` directory |
 
-| Variable      | Default  | Purpose                                 |
-| ------------- | -------- | --------------------------------------- |
-| `PORT`        | `8080`   | Host port used by Docker                |
-| `DB_NAME`     | `taskly` | PostgreSQL database name                |
-| `DB_USER`     | `taskly` | PostgreSQL user                         |
-| `DB_PASSWORD` | required | PostgreSQL password, generated by make |
+### Web app
 
-The frontend must set `VITE_API_BASE_URL=http://localhost:8080/api/v1` and `VITE_SERVER_BASE_URL=http://localhost:8080`.
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `NEXT_PUBLIC_API_BASE_URL` | http://localhost:8080/api/v1 | Base URL of the API |
+| `NEXT_PUBLIC_SERVER_BASE_URL` | http://localhost:8080 | Origin that serves avatars |
 
-## Architecture
+These values are embedded at build time. The Docker build receives them as build arguments.
 
-### Project layout
+### Docker
 
-```
-taskly-backend/
-  src/
-    bootstrap/   composition root, app and server factories
-    config/      environment parsing and validation
-    shared/      errors, event bus, logging, HTTP and PostgreSQL helpers
-    modules/     users, tasks
-    scripts/     migrate, seed
-  test/          unit, integration and e2e suites
-taskly-docker/
-  taskly-backend/Dockerfile
-  docker-compose.local.yml
-  docker-compose.dev.yml
-  Makefile
-.github/workflows/ci.yml
-```
-
-### Module layout
-
-```
-modules/<name>/
-  domain/          entities, value objects, repository contracts
-  application/     use cases
-  infrastructure/  PostgreSQL and other adapters
-  presentation/    Express routers and controllers
-  index.js         public API
-```
-
-### Dependency rules
-
-- Dependencies point inward: presentation and infrastructure depend on application, application depends on domain.
-- Modules never import each other. They communicate through the in-process event bus, so deleting a user removes that user's tasks.
-
-## Database
-
-Schema changes live in `src/shared/infrastructure/postgres/migrations` as numbered `.sql` files. The migrator applies pending files in order, each inside a transaction, records them in `schema_migrations` and holds an advisory lock so concurrent starts do not race. It runs on every startup and through `npm run migrate`.
-
-| Table   | Notes                                                                                   |
-| ------- | --------------------------------------------------------------------------------------- |
-| `users` | `id` UUID, case-insensitive unique `email` and `username`, `password_hash`, `avatar_file`, timestamps |
-| `tasks` | `id` UUID, `owner_id` UUID (foreign key to `users`), `due` timestamptz, `status` and `priority` limited by `CHECK`, indexed on `(owner_id, status)` |
-
-- Identifiers are UUIDs. API responses still expose them as `_id` and `owner`, so existing clients keep working.
-- Listings are ordered by `created_at` and `id`, so ties on the creation time still give a stable order.
-- `tasks.owner_id` references `users(id)` with `ON DELETE CASCADE`. The `user.deleted` event still removes a user's tasks.
-- `status` accepts `todo`, `in_progress` and `done` (default `todo`). `priority` accepts `low`, `medium` and `high`.
-- `email` and `username` are matched without regard to letter case.
-- `due` is stored as a timestamp with time zone and returned as an ISO 8601 UTC string, for example `2026-12-08T10:00:00.000Z`.
+`jira-docker/.env.example` lists every variable used by the compose file. `DB_PASSWORD` and `AUTH_SECRET` are required and generated by `make docker/env`.
 
 ## API
 
-All routes are under `/api/v1`. Routes other than sign up and sign in require the `taskly_token` cookie.
+The full contract is in [jira-openapi/openapi.yml](jira-openapi/openapi.yml). Every route lives under `/api/v1`.
 
-| Method | Path                | Purpose                                         |
-| ------ | ------------------- | ----------------------------------------------- |
-| POST   | `/auth/signup`      | Register and sign in                            |
-| POST   | `/auth/signin`      | Sign in                                         |
-| GET    | `/auth/signout`     | Sign out                                        |
-| GET    | `/users`            | List users, filter with `username` and `email`  |
-| GET    | `/users/:id`        | Get a user                                      |
-| PATCH  | `/users/update/:id` | Update own profile                              |
-| POST   | `/users/upload/:id` | Upload own avatar (`avatar` field, 2 MB)        |
-| DELETE | `/users/delete/:id` | Delete own account                              |
-| POST   | `/tasks/create`     | Create a task                                   |
-| GET    | `/tasks/user/:id`   | List own tasks with `status`, `orderBy`, `page` |
-| GET    | `/tasks/:id`        | Get a task                                      |
-| PATCH  | `/tasks/:id`        | Update a task                                   |
-| DELETE | `/tasks/:id`        | Delete a task                                   |
+| Area | Routes |
+| --- | --- |
+| Auth | `POST /auth/signup`, `POST /auth/signin`, `POST /auth/signout`, `GET /auth/me` |
+| Users | `GET /users?q=`, `GET`, `PATCH` and `DELETE /users/{userId}`, `PUT /users/{userId}/avatar` |
+| Projects | `GET` and `POST /projects`, `GET`, `PATCH` and `DELETE /projects/{projectId}` |
+| Members | `GET` and `POST /projects/{projectId}/members`, `DELETE /projects/{projectId}/members/{userId}` |
+| Issues | `GET` and `POST /projects/{projectId}/issues`, `GET`, `PATCH` and `DELETE /projects/{projectId}/issues/{issueId}` |
+| Comments | `GET` and `POST` on `/projects/{projectId}/issues/{issueId}/comments`, `PATCH` and `DELETE` on `.../comments/{commentId}` |
+
+Conventions:
+
+- Authentication is an HttpOnly cookie named `jira_token`, valid for one hour. Clients send requests with credentials included.
+- Creating answers 201 with the new resource. Deleting answers 204 without a body.
+- Errors have the shape `{ "status": 404, "message": "Project not found!" }`.
+- Sign in answers 401 with the same message for an unknown email and a wrong password.
+- Issue lists accept `search`, `status`, `type` and `assigneeId`. The search term matches title and description and treats `%` and `_` literally.
+
+### Access control
+
+Projects are the unit of access control. Every issue and comment route first checks that the caller is a member of the project in the URL, and issues and comments are always looked up inside that project.
+
+- A request for a project the caller does not belong to answers 404, exactly as if it did not exist.
+- Only the owner can update or delete the project and add or remove members. Members can remove themselves. The owner can never be removed.
+- Reporters and assignees must be members of the project.
+- The author of a comment is always the caller. Only the author can edit it. The author or the project owner can delete it.
+- Fields that clients must not control, such as the project id, the issue number or the author, are never read from request bodies.
+
+## Architecture
+
+### API
+
+The API is a modular monolith. Each module has `domain`, `application`, `infrastructure` and `presentation` layers and is wired together in `src/bootstrap/create-container.js`.
+
+| Module | Responsibility |
+| --- | --- |
+| users | Accounts, sessions and avatars |
+| projects | Projects, membership and the project access service used by other modules |
+| issues | Issues, filters and board positions |
+| comments | Comments on issues |
+
+Domain objects validate themselves through value objects and are persisted by PostgreSQL repositories. Use cases never touch HTTP, and controllers never touch the database. SQL migrations in `src/shared/infrastructure/postgres/migrations` are applied in order at startup.
+
+Issue numbers are allocated by a counter on the project inside the same statement that inserts the issue, so concurrent creates never produce duplicates or gaps.
+
+### Board positions
+
+Each issue has a numeric `listPosition`. New issues get the smallest position of their column minus one. When a card is dropped between two others it receives the midpoint of their positions, so a drag changes exactly one row.
+
+### Web app
+
+Routes in `src/app` are thin. The code lives in `src/features`, one folder per feature with its own API client, query keys, hooks, components and pages. Features only import each other through their `index.ts`, which ESLint enforces.
+
+The board and the issue dialog share one route, `/projects/{projectId}/board/issues/{issueId}`, so opening or closing an issue keeps the filters and scroll position of the board.
+
+Issue descriptions and comments are plain text and are always rendered as text, never as HTML.
 
 ## Testing
 
-| Layer       | Command                    | What it proves                                        |
-| ----------- | -------------------------- | ----------------------------------------------------- |
-| Unit        | `npm run test:unit`        | Domain and use cases, no I/O                          |
-| Integration | `npm run test:integration` | Repositories and HTTP modules on a real PostgreSQL    |
-| E2E         | `npm run test:e2e`         | Full flows against the real server process            |
-| Coverage    | `npm run test:coverage`    | All tests with coverage                               |
+Backend tests need PostgreSQL. Point `TEST_DATABASE_URL` at a server where the user may create databases. The tests create and drop their own databases.
 
-Integration and e2e tests need a PostgreSQL server where the user can create databases. They read `TEST_DATABASE_URL` and default to the development database from `make docker/dev-up`. Every suite creates its own temporary database, runs the migrations and drops it afterwards. Other checks: `npm run lint`, `npm run format:check`.
-
-```sh
-TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres npm test
+```bash
+cd jira-docker
+make docker/dev-up
+cd ../jira-backend
+export TEST_DATABASE_URL=postgres://dev_user:dev_pass@localhost:5432/postgres
+npm test
 ```
 
-## CI
+| Command | Scope |
+| --- | --- |
+| `npm run test:unit` | Domain objects and use cases with in-memory fakes |
+| `npm run test:integration` | Repositories and every HTTP route against PostgreSQL, including access control between projects |
+| `npm run test:e2e` | A real server process, a full team workflow, migrations and seeding |
+| `npm run test:coverage` | Everything above with coverage |
 
-`.github/workflows/ci.yml` runs these jobs:
+Frontend:
 
-1. **Commitlint**: commit message linting on pull requests, configured in `.commitlintrc.json`.
-2. **Quality**: lint and format check.
-3. **Tests**: unit, integration and end-to-end suites against a PostgreSQL 18 service.
-4. **Docker**: builds the image, starts the Compose stack, then checks `/`, signs up a user and runs the seed.
+```bash
+cd jira-frontend
+npm test
+npm run lint
+npm run typecheck
+npm run build
+```
 
-## Limits
+Unit tests cover utilities and components. Integration tests render pages with Testing Library and mock the API with MSW.
 
-- The API needs a running PostgreSQL.
-- Uploaded avatars are stored on local disk and served from `/images/users`. The Compose stack keeps them in the `taskly-avatars` volume.
-- Events are delivered in-process, so the app runs as a single instance.
-- Data from the former MongoDB version is not imported. Identifiers changed from ObjectId to UUID, so old sessions are invalid and users sign in again.
+### Contract test
 
-## References
+The contract test starts from the OpenAPI file, calls every operation on a running API and validates each status code and response body against the schema. It fails when an operation is not covered.
 
-- [Express](https://expressjs.com)
-- [PostgreSQL](https://www.postgresql.org/docs/18/)
-- [node-postgres](https://node-postgres.com)
-- [JSON Web Tokens](https://jwt.io)
-- [Node.js test runner](https://nodejs.org/api/test.html)
-- [ESLint](https://eslint.org) · [Prettier](https://prettier.io)
-- [Docker multi-stage builds](https://docs.docker.com/build/building/multi-stage/)
+```bash
+cd jira-backend
+npm start
+```
+
+In another terminal:
+
+```bash
+pip install -r jira-openapi/contract/requirements.txt
+python jira-openapi/contract/contract_test.py
+```
+
+Use `--validate-only` to check just the specification. Set `API_BASE_URL` when the API is not on http://localhost:8080.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push to main and on pull requests.
+
+| Job | What it does |
+| --- | --- |
+| openapi spec | Validates the OpenAPI document |
+| backend code quality | ESLint and Prettier |
+| backend tests | Unit, integration and e2e tests and coverage against PostgreSQL |
+| api matches openapi | Runs the contract test against a live API |
+| frontend code quality | ESLint, type check, unit and integration tests, coverage |
+| frontend production build | `next build` |
+| docker stack | Builds both images, starts the whole stack, checks both health endpoints and every page, seeds twice and signs in |
+
+`.github/workflows/commitlint.yml` checks pull request commits against Conventional Commits. Allowed scopes are `jira`, `backend`, `frontend`, `openapi`, `docker`, `ci` and `deps`. Dependabot proposes dependency updates.
+
+## Security notes
+
+- Sessions use an HttpOnly cookie, so scripts in the page cannot read the token.
+- Passwords are hashed with bcrypt. Sign in does not reveal whether an email exists.
+- Sign up and sign in are rate limited per client address.
+- Helmet sets security headers. JSON bodies are limited to 100 kB. Avatars are limited to 2 MB and checked for image types.
+- All SQL uses bound parameters, and search patterns are escaped.
+- Project URLs are parsed with the URL parser and only http and https are accepted.
+
+## Known limitations
+
+- There is no email verification and no password reset.
+- Sessions last one hour and there is no refresh token.
+- The board loads up to 1000 issues of a project at once.
+- Descriptions are plain text without formatting.
+- The web app has no browser level end to end tests. Integration tests cover its behavior in jsdom, and the CI docker job checks that every page is served.

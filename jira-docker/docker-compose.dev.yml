@@ -1,0 +1,36 @@
+services:
+  jira-postgres:
+    image: postgres:18.3
+    container_name: jira-postgres-dev
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: jira_dev
+      POSTGRES_USER: dev_user
+      POSTGRES_PASSWORD: dev_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - jira-postgres-dev-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  jira-pgadmin:
+    image: dpage/pgadmin4:9
+    container_name: jira-pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@jira.dev
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+    ports:
+      - "8081:80"
+    depends_on:
+      jira-postgres:
+        condition: service_healthy
+
+volumes:
+  jira-postgres-dev-data:

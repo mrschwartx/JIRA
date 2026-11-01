@@ -1,0 +1,66 @@
+services:
+  jira-postgres:
+    image: postgres:18.3
+    container_name: jira-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-jira}
+      POSTGRES_USER: ${DB_USER:-jira}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required, run make docker/env}
+    volumes:
+      - jira-postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  jira-backend:
+    build:
+      context: ../jira-backend
+      dockerfile: ../jira-docker/jira-backend/Dockerfile
+    image: jira-backend:local
+    container_name: jira-backend
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      APP_LEVEL: ${APP_LEVEL:-development}
+      DATABASE_URL: postgres://${DB_USER:-jira}:${DB_PASSWORD}@jira-postgres:5432/${DB_NAME:-jira}
+      AUTH_SECRET: ${AUTH_SECRET:?AUTH_SECRET is required, run make docker/env}
+      CLIENT_URL: ${CLIENT_URL:-http://localhost:3000}
+      COOKIE_DOMAIN: ${COOKIE_DOMAIN:-}
+      TRUST_PROXY: ${TRUST_PROXY:-0}
+      AUTH_RATE_LIMIT_MAX: ${AUTH_RATE_LIMIT_MAX:-20}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "${API_PORT:-8080}:8080"
+    volumes:
+      - jira-avatars:/app/public/images/users
+    depends_on:
+      jira-postgres:
+        condition: service_healthy
+
+  jira-frontend:
+    build:
+      context: ../jira-frontend
+      dockerfile: ../jira-docker/jira-frontend/Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8080/api/v1}
+        NEXT_PUBLIC_SERVER_BASE_URL: ${NEXT_PUBLIC_SERVER_BASE_URL:-http://localhost:8080}
+    image: jira-frontend:local
+    container_name: jira-frontend
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    depends_on:
+      jira-backend:
+        condition: service_healthy
+
+volumes:
+  jira-postgres-data:
+  jira-avatars:
