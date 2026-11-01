@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -35,7 +35,7 @@ jobs:
       run:
         working-directory: jira-backend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -70,7 +70,7 @@ jobs:
     env:
       TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -112,7 +112,7 @@ jobs:
       LOG_TO_FILE: false
       LOG_SILENT: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -152,7 +152,7 @@ jobs:
       run:
         working-directory: jira-frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -183,7 +183,7 @@ jobs:
       NEXT_PUBLIC_API_BASE_URL: http://localhost:8080/api/v1
       NEXT_PUBLIC_SERVER_BASE_URL: http://localhost:8080
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -201,7 +201,7 @@ jobs:
       run:
         working-directory: jira-docker
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v3
       - name: Prepare environment
         run: make docker/env
