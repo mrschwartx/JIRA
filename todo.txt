@@ -1,0 +1,5 @@
+Find bugs
+
+Fix it:
+
+Bugs UI Task Detail
